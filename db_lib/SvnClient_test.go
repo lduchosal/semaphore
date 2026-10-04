@@ -361,6 +361,30 @@ func TestSvnClient_TaskLeftoversDoNotSurvive(t *testing.T) {
 	assert.Equal(t, "v2", readFile(t, filepath.Join(one.GetFullPath(), "site.yml")))
 }
 
+// Files left in the shared working copy, by hand or by a version which ran
+// tasks in it, are removed before it is linked into a tree.
+func TestSvnClient_WorkingCopyLeftoversRemoved(t *testing.T) {
+	setupGitClientTest(t)
+	f := newSvnFixture(t)
+	f.commit(t, "site.yml", "v2", "second")
+
+	client := CreateSvnClient(nopKeyInstaller{})
+	r := templateRepo(t, f.url, 1)
+	require.NoError(t, client.Clone(r))
+
+	cache := r.Repository.GetSvnCachePath()
+	require.NoError(t, os.WriteFile(filepath.Join(cache, "stale.yml"), []byte("x"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(cache, "roles", "stale"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(cache, "roles", "stale", "main.yml"), []byte("x"), 0644))
+
+	require.NoError(t, client.Pull(r))
+
+	assert.NoFileExists(t, filepath.Join(r.GetFullPath(), "stale.yml"))
+	assert.NoDirExists(t, filepath.Join(r.GetFullPath(), "roles"))
+	assert.NoFileExists(t, filepath.Join(cache, "stale.yml"))
+	assert.Equal(t, "v2", readFile(t, filepath.Join(r.GetFullPath(), "site.yml")))
+}
+
 // The previous tree stays until the next swap, for a task of the same
 // template still running from it.
 func TestSvnClient_PreviousTreeKept(t *testing.T) {

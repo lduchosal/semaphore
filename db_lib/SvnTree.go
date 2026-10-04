@@ -160,10 +160,16 @@ func (c SvnClient) updateCache(r GitRepository, branchURL string, revision strin
 	return c.run(r, GitRepositoryTmpPath, args...)
 }
 
-// revertAndUpdate reverts local modifications first: svn update merges into
-// them and reports a conflict as success. Tasks do not run in the working copy,
-// so there should be none; this keeps a stray one from reaching every template.
+// revertAndUpdate brings the working copy back to its pristine state before
+// updating: svn update merges into local modifications and reports a conflict
+// as success, and the trees of the templates are linked from every file of the
+// working copy, unversioned ones included. Tasks do not run in the working
+// copy, so there should be none; this keeps a stray one, or one left by a
+// version which ran tasks in it, from reaching every template.
 func (c SvnClient) revertAndUpdate(r GitRepository, revision string) error {
+	if err := c.run(r, svnCacheDir, "cleanup", "--remove-unversioned", "--remove-ignored", "."); err != nil {
+		return err
+	}
 	if err := c.run(r, svnCacheDir, "revert", "--recursive", "."); err != nil {
 		return err
 	}
