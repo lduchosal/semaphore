@@ -73,6 +73,22 @@ func (c *RepositoryController) repositoryWithKey(r *http.Request) (db.Repository
 	return repo, err
 }
 
+// subversionPlaybooks lists the playbooks of a Subversion branch without
+// checking it out.
+func (c *RepositoryController) subversionPlaybooks(r *http.Request, repo db.Repository) ([]string, error) {
+	hostConfigs, err := c.hostConfigs(r, repo)
+	if err != nil {
+		return nil, err
+	}
+	defer hostConfigs.Destroy()
+
+	return db_lib.ListSubversionPlaybooks(db_lib.GitRepository{
+		Repository:  repo,
+		Logger:      task_logger.NopLogger{},
+		HostConfigs: hostConfigs,
+	}, c.keyInstaller)
+}
+
 // hostConfigs loads the credential mappings of the project, so browsing a
 // repository reaches a mapped host the same way a task would.
 func (c *RepositoryController) hostConfigs(r *http.Request, repo db.Repository) (*ssh.HostConfigInstallation, error) {
@@ -121,6 +137,7 @@ func (c *RepositoryController) GetRepositoryBranches(w http.ResponseWriter, r *h
 // relative to the repository root, found in the repository. For git/ssh/https
 // repositories it checks out the requested branch (defaulting to the
 // repository's configured branch) into a scratch directory before scanning it.
+// A Subversion branch is listed with svn list instead, without a checkout.
 func (c *RepositoryController) GetRepositoryPlaybooks(w http.ResponseWriter, r *http.Request) {
 	repo := helpers.GetFromContext(r, "repository").(db.Repository)
 
@@ -145,6 +162,17 @@ func (c *RepositoryController) GetRepositoryPlaybooks(w http.ResponseWriter, r *
 			return
 		}
 		repoCopy.GitBranch = branch
+
+		if repoCopy.IsSubversion() {
+			playbooks, err := c.subversionPlaybooks(r, repoCopy)
+			if err != nil {
+				helpers.WriteError(w, err)
+				return
+			}
+			helpers.WriteJSON(w, http.StatusOK, playbooks)
+			return
+		}
+
 		// Clone() does a single-branch clone (git clone --branch <branch>), so a
 		// scratch checkout can only ever serve the branch it was first cloned
 		// with. Key the scratch dir by branch (hashed, since branch names can

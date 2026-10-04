@@ -79,3 +79,40 @@ func FindPlaybooks(rootDir string) ([]string, error) {
 
 	return result, nil
 }
+
+// filterPlaybookPaths applies the rules of FindPlaybooks to a list of file
+// paths relative to the repository root, separated by "/", for a repository
+// listed without a checkout.
+func filterPlaybookPaths(paths []string) []string {
+	result := []string{}
+
+	for _, p := range paths {
+		if len(result) >= maxPlaybookFiles {
+			break
+		}
+
+		parts := strings.Split(p, "/")
+
+		excluded := false
+		for _, dir := range parts[:len(parts)-1] {
+			if excludedPlaybookDirs[dir] {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
+			continue
+		}
+
+		ext := strings.ToLower(filepath.Ext(parts[len(parts)-1]))
+		if ext != ".yml" && ext != ".yaml" {
+			continue
+		}
+
+		result = append(result, p)
+	}
+
+	sort.Strings(result)
+
+	return result
+}

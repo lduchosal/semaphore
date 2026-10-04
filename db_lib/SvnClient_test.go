@@ -262,7 +262,7 @@ func TestSvnClient_CanBePulled(t *testing.T) {
 		r.TmpDirName = "modified"
 		require.NoError(t, client.Clone(r))
 		require.NoError(t, os.WriteFile(filepath.Join(r.GetFullPath(), "site.yml"), []byte("local"), 0644))
-		assert.False(t, client.CanBePulled(r))
+		assert.True(t, client.CanBePulled(r), "Pull reverts it")
 	})
 
 	t.Run("other branch", func(t *testing.T) {
@@ -280,6 +280,85 @@ func TestSvnClient_CanBePulled(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(r.GetFullPath(), "generated.retry"), []byte("x"), 0644))
 		assert.True(t, client.CanBePulled(r))
 	})
+}
+
+func TestSvnClient_TemplatesShareWorkingCopy(t *testing.T) {
+	setupGitClientTest(t)
+
+	one := newTestSvnRepo(t, "svn://svn.example.com/repo", "trunk")
+	one.TemplateID = 1
+	two := newTestSvnRepo(t, "svn://svn.example.com/repo", "trunk")
+	two.TemplateID = 2
+
+	assert.Equal(t, one.GetFullPath(), two.GetFullPath())
+}
+
+// Pull reverts local modifications instead of checking the shared working
+// copy out again, and keeps unversioned files as git pull does.
+func TestSvnClient_PullRevertsLocalModifications(t *testing.T) {
+	setupGitClientTest(t)
+	f := newSvnFixture(t)
+	f.commit(t, "site.yml", "v2", "second")
+
+	client := CreateSvnClient(nopKeyInstaller{})
+	r := newTestSvnRepo(t, f.url, "trunk")
+	require.NoError(t, client.Clone(r))
+
+	require.NoError(t, os.WriteFile(filepath.Join(r.GetFullPath(), "site.yml"), []byte("local"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(r.GetFullPath(), "site.retry"), []byte("x"), 0644))
+	f.commit(t, "site.yml", "v3", "third")
+
+	require.True(t, client.CanBePulled(r))
+	require.NoError(t, client.Pull(r))
+
+	assert.Equal(t, "v3", readFile(t, filepath.Join(r.GetFullPath(), "site.yml")))
+	assert.FileExists(t, filepath.Join(r.GetFullPath(), "site.retry"))
+}
+
+// An interrupted checkout leaves the working copy locked; Pull cleans it up
+// instead of downloading the branch again.
+func TestSvnClient_PullCleansUpLockedWorkingCopy(t *testing.T) {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 is not installed")
+	}
+	setupGitClientTest(t)
+	f := newSvnFixture(t)
+	f.commit(t, "site.yml", "v2", "second")
+
+	client := CreateSvnClient(nopKeyInstaller{})
+	r := newTestSvnRepo(t, f.url, "trunk")
+	require.NoError(t, client.Clone(r))
+
+	// What an interrupted svn command leaves behind.
+	out, err := exec.Command("sqlite3", filepath.Join(r.GetFullPath(), ".svn", "wc.db"),
+		"INSERT INTO wc_lock (wc_id, local_dir_relpath, locked_levels) VALUES (1, '', -1)").CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	f.commit(t, "site.yml", "v3", "third")
+
+	require.True(t, client.CanBePulled(r))
+	require.NoError(t, client.Pull(r))
+	assert.Equal(t, "v3", readFile(t, filepath.Join(r.GetFullPath(), "site.yml")))
+}
+
+func TestListSubversionPlaybooks(t *testing.T) {
+	setupGitClientTest(t)
+	f := newSvnFixture(t)
+	for _, dir := range []string{"plays", "roles/web/tasks", "group_vars"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(f.wc, dir), 0755))
+	}
+	for _, file := range []string{"site.yml", "plays/db.yaml", "roles/web/tasks/main.yml", "group_vars/all.yml", "README.md"} {
+		require.NoError(t, os.WriteFile(filepath.Join(f.wc, file), []byte("x"), 0644))
+	}
+	svnRun(t, f.wc, "add", "--force", ".")
+	svnRun(t, f.wc, "commit", "-m", "playbooks")
+
+	r := newTestSvnRepo(t, f.url, "trunk")
+	playbooks, err := ListSubversionPlaybooks(r, nopKeyInstaller{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"plays/db.yaml", "site.yml"}, playbooks)
+
+	assert.NoDirExists(t, r.GetFullPath(), "listing does not check the branch out")
 }
 
 func TestSvnClient_RejectsInvalidBranch(t *testing.T) {

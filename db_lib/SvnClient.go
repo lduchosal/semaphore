@@ -259,10 +259,41 @@ func (c SvnClient) Clone(r GitRepository) error {
 	return c.run(r, GitRepositoryTmpPath, "checkout", "--", svnPeg(branchURL), dirName)
 }
 
+// Pull reverts local modifications, then updates. svn update merges into
+// local modifications and reports a conflict as success, which would run a
+// playbook with conflict markers; the working copy is shared by the templates
+// of the repository, so checking it out again instead would download the whole
+// branch for all of them. Unversioned files are kept, as git pull keeps them.
 func (c SvnClient) Pull(r GitRepository) error {
 	r.Logger.Log("Updating Subversion repository " + r.Repository.GetRedactedGitURL())
 
+	err := c.revertAndUpdate(r)
+	if err == nil || !svnNeedsCleanup(err) {
+		return err
+	}
+
+	// An interrupted checkout or update leaves the working copy locked.
+	// Cleaning up keeps what was already downloaded.
+	r.Logger.Log("Cleaning up the interrupted Subversion working copy")
+	if err := c.run(r, GitRepositoryFullPath, "cleanup"); err != nil {
+		return err
+	}
+	return c.revertAndUpdate(r)
+}
+
+func (c SvnClient) revertAndUpdate(r GitRepository) error {
+	if err := c.run(r, GitRepositoryFullPath, "revert", "--recursive", "."); err != nil {
+		return err
+	}
 	return c.run(r, GitRepositoryFullPath, "update")
+}
+
+// svnNeedsCleanup reports whether svn refused to work on a working copy left
+// locked by an interrupted command (E155004 working copy locked, E155037
+// previous operation not finished).
+func svnNeedsCleanup(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "E155004") || strings.Contains(msg, "E155037")
 }
 
 func (c SvnClient) Checkout(r GitRepository, target string) error {
@@ -279,9 +310,7 @@ func (c SvnClient) Checkout(r GitRepository, target string) error {
 }
 
 // CanBePulled reports whether the working copy can be updated in place: it is
-// a checkout of the same branch and has no local modifications. Unlike git
-// pull, svn update merges into local modifications and reports a conflict as
-// success, so a modified working copy is checked out again instead.
+// a working copy of the same branch. Local modifications are reverted by Pull.
 func (c SvnClient) CanBePulled(r GitRepository) bool {
 	branchURL, err := svnBranchURL(r)
 	if err != nil {
@@ -291,12 +320,7 @@ func (c SvnClient) CanBePulled(r GitRepository) bool {
 	// Repository edits clear the cache of this server only; a runner may
 	// still hold a working copy of the URL the repository had before.
 	wcURL, err := c.output(r, GitRepositoryFullPath, "info", "--show-item", "url")
-	if err != nil || !svn.SameURL(wcURL, branchURL) {
-		return false
-	}
-
-	status, err := c.output(r, GitRepositoryFullPath, "status", "--quiet")
-	return err == nil && status == ""
+	return err == nil && svn.SameURL(wcURL, branchURL)
 }
 
 type svnLog struct {
@@ -406,4 +430,28 @@ func (c SvnClient) listDirs(r GitRepository, dirURL string) ([]string, error) {
 		}
 	}
 	return dirs, nil
+}
+
+// ListSubversionPlaybooks returns the playbooks of the repository branch with
+// svn list, without a working copy: browsing a branch must not download it.
+func ListSubversionPlaybooks(r GitRepository, keyInstaller AccessKeyInstaller) ([]string, error) {
+	branchURL, err := svnBranchURL(r)
+	if err != nil {
+		return nil, err
+	}
+
+	out, err := SvnClient{keyInstaller: keyInstaller}.output(r, GitRepositoryTmpPath,
+		"list", "--recursive", "--", svnPeg(branchURL))
+	if err != nil {
+		return nil, err
+	}
+
+	files := []string{}
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasSuffix(line, "/") {
+			files = append(files, line)
+		}
+	}
+
+	return filterPlaybookPaths(files), nil
 }

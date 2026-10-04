@@ -416,3 +416,18 @@ func TestRepository_GetCheckoutDirName(t *testing.T) {
 	repo.GitBranch = "feature-login"
 	assert.NotEqual(t, slashed, repo.GetCheckoutDirName(2))
 }
+
+func TestRepository_GetCheckoutDirName_SubversionSharedByTemplates(t *testing.T) {
+	repo := Repository{ID: 1, GitURL: "svn://svn.example.com/repo", GitBranch: "trunk"}
+
+	trunk := repo.GetCheckoutDirName(2)
+	assert.Equal(t, trunk, repo.GetCheckoutDirName(3), "templates share the working copy of a branch")
+	assert.Contains(t, trunk, "repository_1_svn_trunk_")
+
+	repo.GitBranch = "branches/release"
+	assert.NotEqual(t, trunk, repo.GetCheckoutDirName(2), "branches do not share a working copy")
+	assert.NotContains(t, repo.GetCheckoutDirName(2), "/")
+
+	git := Repository{ID: 1, GitURL: "https://example.com/repo.git", GitBranch: "trunk"}
+	assert.NotEqual(t, git.GetCheckoutDirName(2), git.GetCheckoutDirName(3), "git keeps a working tree per template")
+}
