@@ -63,6 +63,16 @@ func NewRepositoryController(
 	}
 }
 
+// repositoryWithKey returns the repository with its access key decrypted.
+// GetRepository loads the key encrypted, and a git or svn client given it as
+// is has no credentials, so browsing a private repository fails while its
+// tasks, which decrypt the key, succeed.
+func (c *RepositoryController) repositoryWithKey(r *http.Request) (db.Repository, error) {
+	repo := helpers.GetFromContext(r, "repository").(db.Repository)
+	err := c.encryptionService.DeserializeSecret(&repo.SSHKey)
+	return repo, err
+}
+
 // hostConfigs loads the credential mappings of the project, so browsing a
 // repository reaches a mapped host the same way a task would.
 func (c *RepositoryController) hostConfigs(r *http.Request, repo db.Repository) (*ssh.HostConfigInstallation, error) {
@@ -75,6 +85,12 @@ func (c *RepositoryController) GetRepositoryBranches(w http.ResponseWriter, r *h
 
 	if repo.GetType() == db.RepositoryLocal || repo.GetType() == db.RepositoryFile {
 		helpers.WriteJSON(w, http.StatusBadRequest, "Wrong repository type: "+repo.GetType())
+		return
+	}
+
+	repo, err := c.repositoryWithKey(r)
+	if err != nil {
+		helpers.WriteError(w, err)
 		return
 	}
 
@@ -123,7 +139,11 @@ func (c *RepositoryController) GetRepositoryPlaybooks(w http.ResponseWriter, r *
 			return
 		}
 
-		repoCopy := repo
+		repoCopy, keyErr := c.repositoryWithKey(r)
+		if keyErr != nil {
+			helpers.WriteError(w, keyErr)
+			return
+		}
 		repoCopy.GitBranch = branch
 		// Clone() does a single-branch clone (git clone --branch <branch>), so a
 		// scratch checkout can only ever serve the branch it was first cloned
