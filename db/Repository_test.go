@@ -417,17 +417,19 @@ func TestRepository_GetCheckoutDirName(t *testing.T) {
 	assert.NotEqual(t, slashed, repo.GetCheckoutDirName(2))
 }
 
-func TestRepository_GetCheckoutDirName_SubversionSharedByTemplates(t *testing.T) {
-	repo := Repository{ID: 1, GitURL: "svn://svn.example.com/repo", GitBranch: "trunk"}
+func TestRepository_GetSvnCachePath(t *testing.T) {
+	original := util.Config
+	t.Cleanup(func() { util.Config = original })
+	util.Config = &util.ConfigType{TmpPath: t.TempDir()}
 
-	trunk := repo.GetCheckoutDirName(2)
-	assert.Equal(t, trunk, repo.GetCheckoutDirName(3), "templates share the working copy of a branch")
-	assert.Contains(t, trunk, "repository_1_svn_trunk_")
+	repo := Repository{ID: 1, ProjectID: 1, GitURL: "svn://svn.example.com/repo", GitBranch: "trunk"}
+
+	trunk := repo.GetSvnCachePath()
+	assert.Contains(t, path.Base(trunk), "repository_1_svn_trunk_")
+	assert.NotEqual(t, repo.GetFullPath(2), repo.GetFullPath(3), "templates keep their own tree")
+	assert.NotEqual(t, trunk, repo.GetFullPath(2))
 
 	repo.GitBranch = "branches/release"
-	assert.NotEqual(t, trunk, repo.GetCheckoutDirName(2), "branches do not share a working copy")
-	assert.NotContains(t, repo.GetCheckoutDirName(2), "/")
-
-	git := Repository{ID: 1, GitURL: "https://example.com/repo.git", GitBranch: "trunk"}
-	assert.NotEqual(t, git.GetCheckoutDirName(2), git.GetCheckoutDirName(3), "git keeps a working tree per template")
+	assert.NotEqual(t, trunk, repo.GetSvnCachePath(), "branches do not share a working copy")
+	assert.NotContains(t, path.Base(repo.GetSvnCachePath()), "/")
 }

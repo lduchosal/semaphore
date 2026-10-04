@@ -53,6 +53,12 @@ type GitRepository struct {
 	// host this repository reaches, including submodules.
 	HostConfigs *ssh.HostConfigInstallation
 
+	// Lock, when set, serializes work on a shared directory: it blocks until
+	// the lock for the path is held and returns the function releasing it.
+	// The Subversion client uses it for the working copy every template of a
+	// repository branch shares. Callers that check a repository out set it.
+	Lock func(path string) (unlock func())
+
 	// retryDelay overrides gitRetryDelay so tests do not have to wait for it.
 	retryDelay time.Duration
 }

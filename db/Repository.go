@@ -85,18 +85,19 @@ func branchDirName(branch string) string {
 
 // GetCheckoutDirName returns the checkout directory name for this template and
 // branch. Different branches must not share a working tree while tasks run.
-//
-// A Subversion working copy is shared by every template of the repository
-// using the branch: it holds a second copy of every file and is not
-// compressed, so one per template does not scale (200 templates of a 4 GB
-// repository would take 1.6 TB). Tasks share it the way parallel tasks of one
-// template already share a git working tree, with the update serialized by
-// the repository lock, which is keyed by this path.
 func (r Repository) GetCheckoutDirName(templateID int) string {
-	if r.IsSubversion() {
-		return r.getDirNamePrefix() + "svn_" + branchDirName(r.GitBranch)
-	}
 	return r.GetDirName(templateID) + "_" + branchDirName(r.GitBranch)
+}
+
+// GetSvnCachePath returns the Subversion working copy of the branch, shared
+// by every template of the repository using it. A working copy per template
+// does not scale for Subversion: it holds a second copy of every file and is
+// not compressed (200 templates of a 4 GB repository would take terabytes).
+// Tasks never run in it: each template gets its own tree, made of hard links
+// to it (see db_lib.SvnClient).
+func (r Repository) GetSvnCachePath() string {
+	return path.Join(util.Config.GetProjectTmpDir(r.ProjectID),
+		r.getDirNamePrefix()+"svn_"+branchDirName(r.GitBranch))
 }
 
 // GetHomePath returns the per-template "home" directory with a "_home" suffix.
