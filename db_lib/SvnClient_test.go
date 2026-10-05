@@ -245,6 +245,43 @@ func TestSvnClient_GetRemoteBranches(t *testing.T) {
 	})
 }
 
+func TestSvnClient_CanBePulled(t *testing.T) {
+	setupGitClientTest(t)
+	f := newSvnFixture(t)
+	f.commit(t, "site.yml", "v2", "second")
+	f.branch(t, "branches/release")
+
+	client := CreateSvnClient(nopKeyInstaller{})
+
+	t.Run("missing working copy", func(t *testing.T) {
+		assert.False(t, client.CanBePulled(newTestSvnRepo(t, f.url, "trunk")))
+	})
+
+	t.Run("local modification", func(t *testing.T) {
+		r := newTestSvnRepo(t, f.url, "trunk")
+		r.TmpDirName = "modified"
+		require.NoError(t, client.Clone(r))
+		require.NoError(t, os.WriteFile(filepath.Join(r.GetFullPath(), "site.yml"), []byte("local"), 0644))
+		assert.False(t, client.CanBePulled(r))
+	})
+
+	t.Run("other branch", func(t *testing.T) {
+		r := newTestSvnRepo(t, f.url, "trunk")
+		r.TmpDirName = "other"
+		require.NoError(t, client.Clone(r))
+		r.Repository.GitBranch = "branches/release"
+		assert.False(t, client.CanBePulled(r))
+	})
+
+	t.Run("unversioned file", func(t *testing.T) {
+		r := newTestSvnRepo(t, f.url, "trunk")
+		r.TmpDirName = "unversioned"
+		require.NoError(t, client.Clone(r))
+		require.NoError(t, os.WriteFile(filepath.Join(r.GetFullPath(), "generated.retry"), []byte("x"), 0644))
+		assert.True(t, client.CanBePulled(r))
+	})
+}
+
 func TestListSubversionPlaybooks(t *testing.T) {
 	setupGitClientTest(t)
 	f := newSvnFixture(t)
@@ -265,213 +302,31 @@ func TestListSubversionPlaybooks(t *testing.T) {
 	assert.NoDirExists(t, r.GetFullPath(), "listing does not check the branch out")
 }
 
-func templateRepo(t *testing.T, url string, templateID int) GitRepository {
-	t.Helper()
-	r := newTestSvnRepo(t, url, "trunk")
-	r.TemplateID = templateID
-	return r
-}
-
-// Each template runs from its own tree, linked to the one working copy of the
-// branch: no .svn in the tree, files shared with the working copy, read-only.
-func TestSvnClient_TemplateTreeLinksSharedWorkingCopy(t *testing.T) {
+// Each template checks the branch out in its own working copy, as for git:
+// nothing a task does in it reaches another template.
+func TestSvnClient_WorkingCopyPerTemplate(t *testing.T) {
 	setupGitClientTest(t)
 	f := newSvnFixture(t)
 	f.commit(t, "site.yml", "v2", "second")
 
 	client := CreateSvnClient(nopKeyInstaller{})
-	one := templateRepo(t, f.url, 1)
-	two := templateRepo(t, f.url, 2)
+	one := newTestSvnRepo(t, f.url, "trunk")
+	one.TemplateID = 1
+	two := newTestSvnRepo(t, f.url, "trunk")
+	two.TemplateID = 2
 
 	require.NoError(t, client.Clone(one))
+	require.NoError(t, os.WriteFile(filepath.Join(one.GetFullPath(), "leftover.yml"), []byte("x"), 0644))
+
+	f.commit(t, "site.yml", "v3", "third")
 	require.NoError(t, client.Clone(two))
 
 	assert.NotEqual(t, one.GetFullPath(), two.GetFullPath())
-	assert.NoDirExists(t, filepath.Join(one.GetFullPath(), ".svn"))
-	assert.DirExists(t, filepath.Join(one.Repository.GetSvnCachePath(), ".svn"))
-
-	cached, err := os.Stat(filepath.Join(one.Repository.GetSvnCachePath(), "site.yml"))
-	require.NoError(t, err)
-	for _, r := range []GitRepository{one, two} {
-		linked, err := os.Stat(filepath.Join(r.GetFullPath(), "site.yml"))
-		require.NoError(t, err)
-		assert.True(t, os.SameFile(cached, linked), "the tree links the working copy")
-		assert.Zero(t, linked.Mode().Perm()&0222, "linked files are read-only")
-	}
-}
-
-// The revision a task runs and records does not move while another template
-// updates the shared working copy or checks it out at another revision.
-func TestSvnClient_TemplateTreeIsolatedFromOtherTemplates(t *testing.T) {
-	setupGitClientTest(t)
-	f := newSvnFixture(t)
-	f.commit(t, "site.yml", "v2", "second")
-
-	client := CreateSvnClient(nopKeyInstaller{})
-	running := templateRepo(t, f.url, 1)
-	other := templateRepo(t, f.url, 2)
-
-	require.NoError(t, client.Clone(running))
-
-	f.commit(t, "site.yml", "v3", "third")
-	require.NoError(t, client.Pull(other))
-	assert.Equal(t, "v3", readFile(t, filepath.Join(other.GetFullPath(), "site.yml")))
-
-	assert.Equal(t, "v2", readFile(t, filepath.Join(running.GetFullPath(), "site.yml")))
-	hash, err := client.GetLastCommitHash(running)
-	require.NoError(t, err)
-	assert.Equal(t, "2", hash)
-	msg, err := client.GetLastCommitMessage(running)
-	require.NoError(t, err)
-	assert.Equal(t, "second", msg)
-
-	// A re-run of the other template at an older revision.
-	require.NoError(t, client.Checkout(other, "1"))
-	assert.NoFileExists(t, filepath.Join(other.GetFullPath(), "site.yml"))
-	assert.Equal(t, "v2", readFile(t, filepath.Join(running.GetFullPath(), "site.yml")))
-}
-
-// Files a task leaves in its tree reach neither another template nor the next
-// task, and a task cannot write through a link into the shared files.
-func TestSvnClient_TaskLeftoversDoNotSurvive(t *testing.T) {
-	setupGitClientTest(t)
-	f := newSvnFixture(t)
-	f.commit(t, "site.yml", "v2", "second")
-
-	client := CreateSvnClient(nopKeyInstaller{})
-	one := templateRepo(t, f.url, 1)
-	two := templateRepo(t, f.url, 2)
-	require.NoError(t, client.Clone(one))
-
-	require.NoError(t, os.WriteFile(filepath.Join(one.GetFullPath(), "extra.yml"), []byte("x"), 0644))
-	assert.Error(t, os.WriteFile(filepath.Join(one.GetFullPath(), "site.yml"), []byte("tampered"), 0644))
-
-	// A tool replacing the file (ansible template, sed -i) only touches the tree.
-	replaced := filepath.Join(one.GetFullPath(), "site.yml.tmp")
-	require.NoError(t, os.WriteFile(replaced, []byte("rewritten"), 0644))
-	require.NoError(t, os.Rename(replaced, filepath.Join(one.GetFullPath(), "site.yml")))
-
-	require.NoError(t, client.Clone(two))
-	assert.NoFileExists(t, filepath.Join(two.GetFullPath(), "extra.yml"))
-	assert.Equal(t, "v2", readFile(t, filepath.Join(two.GetFullPath(), "site.yml")))
-	assert.Equal(t, "v2", readFile(t, filepath.Join(one.Repository.GetSvnCachePath(), "site.yml")))
-
-	require.NoError(t, client.Pull(one))
-	assert.NoFileExists(t, filepath.Join(one.GetFullPath(), "extra.yml"))
-	assert.Equal(t, "v2", readFile(t, filepath.Join(one.GetFullPath(), "site.yml")))
-}
-
-// Files left in the shared working copy, by hand or by a version which ran
-// tasks in it, are removed before it is linked into a tree.
-func TestSvnClient_WorkingCopyLeftoversRemoved(t *testing.T) {
-	setupGitClientTest(t)
-	f := newSvnFixture(t)
-	f.commit(t, "site.yml", "v2", "second")
-
-	client := CreateSvnClient(nopKeyInstaller{})
-	r := templateRepo(t, f.url, 1)
-	require.NoError(t, client.Clone(r))
-
-	cache := r.Repository.GetSvnCachePath()
-	require.NoError(t, os.WriteFile(filepath.Join(cache, "stale.yml"), []byte("x"), 0644))
-	require.NoError(t, os.MkdirAll(filepath.Join(cache, "roles", "stale"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(cache, "roles", "stale", "main.yml"), []byte("x"), 0644))
-
-	require.NoError(t, client.Pull(r))
-
-	assert.NoFileExists(t, filepath.Join(r.GetFullPath(), "stale.yml"))
-	assert.NoDirExists(t, filepath.Join(r.GetFullPath(), "roles"))
-	assert.NoFileExists(t, filepath.Join(cache, "stale.yml"))
-	assert.Equal(t, "v2", readFile(t, filepath.Join(r.GetFullPath(), "site.yml")))
-}
-
-// The previous tree stays until the next swap, for a task of the same
-// template still running from it.
-func TestSvnClient_PreviousTreeKept(t *testing.T) {
-	setupGitClientTest(t)
-	f := newSvnFixture(t)
-	f.commit(t, "site.yml", "v2", "second")
-
-	client := CreateSvnClient(nopKeyInstaller{})
-	r := templateRepo(t, f.url, 1)
-	require.NoError(t, client.Clone(r))
-
-	f.commit(t, "site.yml", "v3", "third")
-	require.NoError(t, client.Pull(r))
-
-	assert.Equal(t, "v3", readFile(t, filepath.Join(r.GetFullPath(), "site.yml")))
-	assert.Equal(t, "v2", readFile(t, filepath.Join(r.GetFullPath()+".old", "site.yml")))
-}
-
-func TestSvnClient_LocksSharedWorkingCopy(t *testing.T) {
-	setupGitClientTest(t)
-	f := newSvnFixture(t)
-
-	client := CreateSvnClient(nopKeyInstaller{})
-	r := templateRepo(t, f.url, 1)
-
-	locked := []string{}
-	held := false
-	r.Lock = func(path string) func() {
-		locked = append(locked, path)
-		held = true
-		return func() { held = false }
-	}
-
-	require.NoError(t, client.Clone(r))
-	assert.Equal(t, []string{r.Repository.GetSvnCachePath()}, locked)
-	assert.False(t, held, "released")
-}
-
-// A working copy left locked by an interrupted command is cleaned up and
-// updated, keeping what was downloaded.
-func TestSvnClient_CleansUpLockedWorkingCopy(t *testing.T) {
-	if _, err := exec.LookPath("sqlite3"); err != nil {
-		t.Skip("sqlite3 is not installed")
-	}
-	setupGitClientTest(t)
-	f := newSvnFixture(t)
-	f.commit(t, "site.yml", "v2", "second")
-
-	client := CreateSvnClient(nopKeyInstaller{})
-	r := templateRepo(t, f.url, 1)
-	require.NoError(t, client.Clone(r))
-
-	// What an interrupted svn command leaves behind.
-	out, err := exec.Command("sqlite3", filepath.Join(r.Repository.GetSvnCachePath(), ".svn", "wc.db"),
-		"INSERT INTO wc_lock (wc_id, local_dir_relpath, locked_levels) VALUES (1, '', -1)").CombinedOutput()
-	require.NoError(t, err, string(out))
-	marker := filepath.Join(r.Repository.GetSvnCachePath(), ".svn", "kept")
-	require.NoError(t, os.WriteFile(marker, nil, 0644))
-
-	f.commit(t, "site.yml", "v3", "third")
-
-	require.NoError(t, client.Pull(r))
-	assert.Equal(t, "v3", readFile(t, filepath.Join(r.GetFullPath(), "site.yml")))
-	assert.FileExists(t, marker, "not checked out again")
-}
-
-// The shared working copy is checked out again when it is of another URL.
-func TestSvnClient_WorkingCopyOfAnotherURL(t *testing.T) {
-	setupGitClientTest(t)
-	f := newSvnFixture(t)
-	f.commit(t, "site.yml", "v2", "second")
-	f.branch(t, "branches/release")
-	f.commit(t, "site.yml", "v4", "trunk moves on")
-
-	client := CreateSvnClient(nopKeyInstaller{})
-	r := templateRepo(t, f.url, 1)
-	require.NoError(t, client.Clone(r))
-
-	// What a runner still holds after the repository URL was edited.
-	moved := r
-	moved.Repository.GitURL = f.url + "/branches"
-	moved.Repository.GitBranch = "release"
-	require.NoError(t, os.MkdirAll(filepath.Dir(moved.Repository.GetSvnCachePath()), 0755))
-	require.NoError(t, os.Rename(r.Repository.GetSvnCachePath(), moved.Repository.GetSvnCachePath()))
-
-	require.NoError(t, client.Pull(moved))
-	assert.Equal(t, "v2", readFile(t, filepath.Join(moved.GetFullPath(), "site.yml")))
+	assert.DirExists(t, filepath.Join(two.GetFullPath(), ".svn"))
+	assert.NoFileExists(t, filepath.Join(two.GetFullPath(), "leftover.yml"))
+	assert.Equal(t, "v3", readFile(t, filepath.Join(two.GetFullPath(), "site.yml")))
+	assert.Equal(t, "v2", readFile(t, filepath.Join(one.GetFullPath(), "site.yml")),
+		"another template's update does not touch this working copy")
 }
 
 func TestSvnClient_RejectsInvalidBranch(t *testing.T) {

@@ -1175,15 +1175,6 @@ func (t *LocalExecutor) updateAndCheckoutRepository() error {
 	return nil
 }
 
-// repoLock returns the lock of the repository directories for the git client,
-// which the Subversion client uses for the working copy shared by templates.
-func (t *LocalExecutor) repoLock() func(path string) func() {
-	if t.RepoLock == nil {
-		return nil
-	}
-	return t.RepoLock.Lock
-}
-
 func (t *LocalExecutor) updateRepository() error {
 	repo := db_lib.GitRepository{
 		Logger:      t.Logger,
@@ -1191,7 +1182,6 @@ func (t *LocalExecutor) updateRepository() error {
 		Repository:  t.Repository,
 		Client:      db_lib.CreateDefaultGitClient(t.KeyInstaller),
 		HostConfigs: t.hostConfigInstallation,
-		Lock:        t.repoLock(),
 	}
 
 	err := repo.ValidateRepo()
@@ -1229,7 +1219,6 @@ func (t *LocalExecutor) checkoutRepository() error {
 		Repository:  t.Repository,
 		Client:      db_lib.CreateDefaultGitClient(t.KeyInstaller),
 		HostConfigs: t.hostConfigInstallation,
-		Lock:        t.repoLock(),
 	}
 
 	err := repo.ValidateRepo()

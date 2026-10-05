@@ -1,6 +1,7 @@
 package db_lib
 
 import (
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/pkg/git"
 	"github.com/semaphoreui/semaphore/pkg/ssh"
+	"github.com/semaphoreui/semaphore/pkg/svn"
 	"github.com/semaphoreui/semaphore/util"
 
 	log "github.com/sirupsen/logrus"
@@ -23,9 +25,6 @@ import (
 // (trunk, branches/x, tags/y), so a template or a task selects a branch the way
 // it does for git. The last revision which changed that path stands in for the
 // commit hash.
-//
-// The working copy of a branch is shared by the templates of the repository;
-// each template runs from its own tree of hard links to it (SvnTree.go).
 type SvnClient struct {
 	keyInstaller AccessKeyInstaller
 }
@@ -131,8 +130,6 @@ func (c SvnClient) makeCmd(
 		}
 	case GitRepositoryFullPath:
 		cmd.Dir = r.GetFullPath()
-	case svnCacheDir:
-		cmd.Dir = r.Repository.GetSvnCachePath()
 	default:
 		panic("unknown Repository directory type")
 	}
@@ -234,6 +231,116 @@ func svnError(err error, stderr []byte) error {
 	}
 
 	return fmt.Errorf("%w: %s", err, strings.Join(lines, " / "))
+}
+
+func (c SvnClient) Clone(r GitRepository) error {
+	r.Logger.Log("Checking out Subversion repository " + r.Repository.GetRedactedGitURL())
+
+	branchURL, err := svnBranchURL(r)
+	if err != nil {
+		return err
+	}
+
+	var dirName string
+	if r.TmpDirName == "" {
+		dirName = r.Repository.GetCheckoutDirName(r.TemplateID)
+	} else {
+		dirName = r.TmpDirName
+	}
+
+	targetPath := r.GetFullPath()
+	if err := os.MkdirAll(targetPath, 0755); err != nil {
+		return err
+	}
+	if err := util.ChownDir(targetPath); err != nil {
+		return err
+	}
+
+	return c.run(r, GitRepositoryTmpPath, "checkout", "--", svnPeg(branchURL), dirName)
+}
+
+func (c SvnClient) Pull(r GitRepository) error {
+	r.Logger.Log("Updating Subversion repository " + r.Repository.GetRedactedGitURL())
+
+	return c.run(r, GitRepositoryFullPath, "update")
+}
+
+func (c SvnClient) Checkout(r GitRepository, target string) error {
+	r.Logger.Log("Updating Subversion repository to revision " + target)
+
+	if target == "" {
+		return fmt.Errorf("task commit hash is empty")
+	}
+	if err := svn.ValidateRevision(target, "task"); err != nil {
+		return err
+	}
+
+	return c.run(r, GitRepositoryFullPath, "update", "--revision", target)
+}
+
+// CanBePulled reports whether the working copy can be updated in place: it is
+// a checkout of the same branch and has no local modifications. Unlike git
+// pull, svn update merges into local modifications and reports a conflict as
+// success, so a modified working copy is checked out again instead.
+func (c SvnClient) CanBePulled(r GitRepository) bool {
+	branchURL, err := svnBranchURL(r)
+	if err != nil {
+		return false
+	}
+
+	// Repository edits clear the cache of this server only; a runner may
+	// still hold a working copy of the URL the repository had before.
+	wcURL, err := c.output(r, GitRepositoryFullPath, "info", "--show-item", "url")
+	if err != nil || !svn.SameURL(wcURL, branchURL) {
+		return false
+	}
+
+	status, err := c.output(r, GitRepositoryFullPath, "status", "--quiet")
+	return err == nil && status == ""
+}
+
+type svnLog struct {
+	Entries []struct {
+		Revision string `xml:"revision,attr"`
+		Msg      string `xml:"msg"`
+	} `xml:"logentry"`
+}
+
+func (c SvnClient) GetLastCommitMessage(r GitRepository) (msg string, err error) {
+	r.Logger.Log("Get current commit message")
+
+	revision, err := c.GetLastCommitHash(r)
+	if err != nil {
+		return
+	}
+
+	out, err := c.output(r, GitRepositoryFullPath, "log", "--xml", "--limit", "1", "--revision", revision)
+	if err != nil {
+		return
+	}
+
+	var entries svnLog
+	if err = xml.Unmarshal([]byte(out), &entries); err != nil {
+		return
+	}
+
+	if len(entries.Entries) == 0 {
+		return
+	}
+
+	// show-branch prints the subject line only; do the same.
+	msg, _, _ = strings.Cut(strings.TrimSpace(entries.Entries[0].Msg), "\n")
+	msg = truncateCommitMessage(msg)
+
+	return
+}
+
+// GetLastCommitHash returns the last revision which changed the checked out
+// path, not the revision of the whole repository, so a commit elsewhere in the
+// repository does not look like a change to this one.
+func (c SvnClient) GetLastCommitHash(r GitRepository) (hash string, err error) {
+	r.Logger.Log("Get current commit hash")
+	return c.output(r, GitRepositoryFullPath, "info", "--show-item", "last-changed-revision")
 }
 
 func (c SvnClient) GetLastRemoteCommitHash(r GitRepository) (hash string, err error) {

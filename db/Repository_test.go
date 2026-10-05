@@ -416,20 +416,3 @@ func TestRepository_GetCheckoutDirName(t *testing.T) {
 	repo.GitBranch = "feature-login"
 	assert.NotEqual(t, slashed, repo.GetCheckoutDirName(2))
 }
-
-func TestRepository_GetSvnCachePath(t *testing.T) {
-	original := util.Config
-	t.Cleanup(func() { util.Config = original })
-	util.Config = &util.ConfigType{TmpPath: t.TempDir()}
-
-	repo := Repository{ID: 1, ProjectID: 1, GitURL: "svn://svn.example.com/repo", GitBranch: "trunk"}
-
-	trunk := repo.GetSvnCachePath()
-	assert.Contains(t, path.Base(trunk), "repository_1_svn_trunk_")
-	assert.NotEqual(t, repo.GetFullPath(2), repo.GetFullPath(3), "templates keep their own tree")
-	assert.NotEqual(t, trunk, repo.GetFullPath(2))
-
-	repo.GitBranch = "branches/release"
-	assert.NotEqual(t, trunk, repo.GetSvnCachePath(), "branches do not share a working copy")
-	assert.NotContains(t, path.Base(repo.GetSvnCachePath()), "/")
-}

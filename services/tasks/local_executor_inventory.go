@@ -72,7 +72,6 @@ func (t *LocalExecutor) cloneInventoryRepo(keyInstaller db_lib.AccessKeyInstalle
 		Repository:  *t.Inventory.Repository,
 		Client:      db_lib.CreateDefaultGitClient(keyInstaller),
 		HostConfigs: t.hostConfigInstallation,
-		Lock:        t.repoLock(),
 	}
 
 	// Parallel tasks of the same template share this inventory directory —
